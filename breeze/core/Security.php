@@ -1,0 +1,622 @@
+<?php
+
+namespace breeze\core;
+
+use breeze\utils\Utils;
+
+abstract class Security extends Input
+{
+	
+	/**
+	 * @private
+	 */
+	protected $CSRF_EXPIRE			= 3600;
+	
+	/**
+	 * @private
+	 */
+	protected $TOKEN_NAME		= '__HASH__';
+	
+	/**
+	 * @private
+	 */
+	protected $COOKIE_NAME	    = '__CSRF__';
+
+	/**
+	 * @private
+	 */
+	protected $hash			   = null;
+
+    /**
+     * @private
+     * 是否启用 xss 安全
+     */
+    protected $XSS_ENABLE		= true;
+
+    /**
+     * @private
+     * 是否启用 csrf 安全
+     */
+    protected $CSRF_ENABLE		= true;
+
+    /**
+     * @private
+     * 是否使用标准的换行符
+     */
+    private $standardizeNewLines	= true;
+
+	/**
+	 * @private
+	 */
+	protected $neverAllowed = array(
+		'document.cookie'	=> '[removed]',
+		'document.write'	=> '[removed]',
+		'.parentNode'		=> '[removed]',
+		'.innerHTML'		=> '[removed]',
+		'window.location'	=> '[removed]',
+		'-moz-binding'		=> '[removed]',
+		'<!--'				=> '&lt;!--',
+		'-->'				=> '--&gt;',
+		'<![CDATA['			=> '&lt;![CDATA[',
+		'<comment>'			=> '&lt;comment&gt;'
+	);
+
+	/**
+	 * @private
+	 */
+	protected $neverAllowedRegex = array(
+		'javascript\s*:',
+		'expression\s*(\(|&\#40;)', // CSS and IE
+		'vbscript\s*:', // IE, surprise!
+		'Redirect\s+302',
+		'(["\'])?data\s*:[^\\1]*?base64[^\\1]*?,[^\\1]*?\\1?'
+	);
+
+    /**
+     * 获取哈希字符串。
+     * @return string
+     */
+    public function getHash()
+    {
+        if ( $this->hash===null )
+        {
+            /*$csrf=$this->cookie( $this->CSRF_COOKIE_NAME );
+            if ( !empty( $csrf ) && preg_match('#^[0-9a-f]{32}$#iS', $csrf ) === 1 )
+            {
+                $this->hash = $csrf;
+
+            }else
+            {*/
+            $this->hash = md5( uniqid(rand(), TRUE) );
+            //}
+        }
+        return $this->hash;
+    }
+
+    /**
+     * 给字符串添加转义符
+     * @param string $str
+     * @return string
+     */
+    public function addslashes( $str )
+    {
+        if( !is_string($str) || empty($str) )
+            return $str;
+
+        /**
+         * 防止重复转义
+         * magic_quotes_gpc = on 时系统会自动添加转义符
+         */
+        if( get_magic_quotes_gpc() )
+            $str=stripslashes( $str );
+        return addslashes( $str );
+    }
+
+    /**
+     * @private
+     * 过滤外部输入的数据
+     * @param  mixed	$data
+     * @return mixed
+     */
+    public  function filter(  & $data )
+    {
+
+        if ( is_array( $data ) || is_object($data) ) foreach ( $data as $key => & $val )
+        {
+            $data[ $this->checkKey( $key ) ]=$this->filter( $val );
+        }
+        else
+        {
+            $this->XSS_ENABLE === true && $data = $this->clean( $data );
+            $data = $this->convert( $data );
+            $data=$this->addslashes( $data );
+
+            // 使用标准换行
+            if ($this->standardizeNewLines == true && is_string( $data ) )
+            {
+                strpos( $data, "\r") !== false &&
+                $data = str_replace(array("\r\n", "\r", "\r\n\n"), PHP_EOL, $data );
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * 获取令牌名
+     * @return 	string
+     */
+    public function tokenName()
+    {
+        return $this->TOKEN_NAME;
+    }
+	
+	/**
+	 * @see \breeze\core\System::initialize()
+	 */
+	protected function initialize()
+	{
+        parent::initialize();
+
+        $this->isConfig('XSS_ENABLE')  && $this->XSS_ENABLE  =  !( $this->getConfig('XSS_ENABLE')  === false );
+        $this->isConfig('CSRF_ENABLE') && $this->CSRF_ENABLE =  !( $this->getConfig('CSRF_ENABLE') === false );
+
+		//是否开启了 csrf 保护 
+		if ( $this->CSRF_ENABLE !== false )
+		{
+			foreach ( array('CSRF_EXPIRE', 'CSRF_TOKEN_NAME', 'CSRF_COOKIE_NAME' ) as $key ) if ( $this->isConfig($key) )
+			{
+				$this->$key = $this->getConfig( $key );
+			}
+            $this->verification();
+		}
+
+        //验证全局变量
+        $this->checkGlobals();
+	}
+
+	/**
+	 * 防止跨站脚本功击
+	 * @return	void
+	 */
+	protected function verification()
+	{
+		if ( isset($_SERVER['REQUEST_METHOD']) && strcasecmp( $_SERVER['REQUEST_METHOD'] ,'POST' ) ===0 )
+		{
+		    $csrf_value=$this->cookie( $this->COOKIE_NAME );
+		    
+			if ( !isset( $_POST[ $this->TOKEN_NAME ] ) || empty($csrf_value) ||
+			     $_POST[ $this->TOKEN_NAME ] != $csrf_value )
+			{
+                throw new Error(Lang::info(1012));
+			}
+			unset( $_POST[ $this->TOKEN_NAME ] );
+            unset( $_REQUEST[ $this->TOKEN_NAME ] );
+			$this->setCookie($this->COOKIE_NAME,null);
+		}
+        $this->setCookie( $this->COOKIE_NAME, $this->getHash() , $this->CSRF_EXPIRE );
+	}
+
+	/**
+	 * 清除一些不符合要求的数据
+	 * @return	string
+	 */
+	protected function clean( & $str )
+	{
+	    if( !is_string($str) )
+	        return $str;
+
+		$str = $this->removeInvisibleCharacters($str);
+		$str = $this->validateEntities($str);
+		strpos($str,'%')!==false && $str = rawurldecode( $str );
+		$str = preg_replace_callback('/\w+=([\'\"]).*?\\1/si', array($this, 'convertAttribute'), $str);
+		$str = preg_replace_callback('/<\w+.*?(?=>|<|$)/si', array($this, 'decodeEntity'), $str);
+		strpos($str, '\t') !== false && $str = str_replace('\t', ' ', $str);
+		$str = $this->disallow($str);
+		$str = str_replace(array('<?', '?>'),  array('&lt;?', '?&gt;'), $str);
+
+		/*
+		 * 合并以下分开的语句
+		 */
+		$words = array(
+			'javascript', 'expression', 'vbscript', 'script', 'base64',
+			'applet', 'alert', 'document', 'write', 'cookie', 'window'
+		);
+
+		foreach ($words as $word)
+		{
+			$temp = '';
+			for ($i = 0, $wordlen = strlen($word); $i < $wordlen; $i++)
+			{
+				$temp .= substr($word, $i, 1).'\s*';
+			}
+			$str = preg_replace_callback('#('.substr($temp, 0, -3).')(\W)#is', array($this, 'compactExplodedWords'), $str);
+		}
+
+		/*
+		 * 清除不合法的标签
+		 */
+		do
+		{
+			$original = $str;
+
+			if (preg_match('/<a/i', $str))
+			{
+				$str = preg_replace_callback('#<a\s+([^>]*?)(>|$)#si', array($this, 'jslinkRemoval'), $str);
+			}
+
+			if (preg_match('/<img/i', $str))
+			{
+				$str = preg_replace_callback('#<img\s+([^>]*?)(\s?/?>|$)#si', array($this, 'jsimgRemoval'), $str);
+			}
+
+			if (preg_match('/script/i', $str) OR preg_match('/xss/i', $str))
+			{
+				$str = preg_replace('#<(/*)(script|xss)(.*?)\>#si', '[removed]', $str);
+			}
+		}
+		while($original != $str);
+		unset($original);
+
+		//清除不符合要求的属性
+		$str = $this->removeEvilAttributes($str, false);
+
+		/*
+		 * 修正不符合要求的html标签
+		 */
+		$naughty = 'alert|applet|audio|basefont|base|behavior|bgsound|blink|body|embed|expression|form|frameset|frame|head|html|ilayer|iframe|input|isindex|layer|link|meta|object|plaintext|style|script|textarea|title|video|xml|xss';
+		$str = preg_replace_callback('#<(/*\s*)('.$naughty.')([^><]*)([><]*)#is', array($this, 'sanitizeNaughtyHtml'), $str);
+
+		/*
+		 * 修正不符合要求的 script 语法
+		 */
+		$str = preg_replace('#(alert|cmd|passthru|eval|exec|expression|system|fopen|fsockopen|file|file_get_contents|readfile|unlink)(\s*)\((.*?)\)#si', '\\1\\2&#40;\\3&#41;', $str);
+		$str = $this->disallow($str);
+
+		return $str;
+	}
+	
+	
+	/**
+	 * 移除隐藏的字符
+	 * @param string $str
+	 * @param string $urlEncoded
+	 * @return string
+	 */
+	private function removeInvisibleCharacters($str, $urlEncoded = TRUE )
+	{
+		$displayables = array();
+	
+		if ( $urlEncoded )
+		{
+			$displayables[] = '/%0[0-8bcef]/';	// url encoded 00-08, 11, 12, 14, 15
+			$displayables[] = '/%1[0-9a-f]/';	// url encoded 16-31
+		}
+	
+		$displayables[] = '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/S';	// 00-08, 11, 12, 14-31, 127
+	
+		do
+		{
+			$str = preg_replace($displayables, '', $str, -1, $count);
+			
+		} while ( $count );
+	
+		return $str;
+	}
+
+	/**
+	 * 解析通过 htmlentities 编码后的字符
+	 * @param	string
+	 * @param	string
+	 * @return	string
+	 */
+	public function unhtmlentities($str, $charset='UTF-8')
+	{
+		if ( strpos($str, '&') === false )
+		{
+			return $str;
+		}
+		$str = html_entity_decode($str, ENT_COMPAT, $charset);
+		$str = preg_replace_callback('~&#x(0*[0-9a-f]{2,5})~i',  function($param){return chr(hexdec($param[1]));}, $str);
+		return preg_replace_callback('~&#([0-9]{2,4})~', function($param){return chr($param[1]);}, $str);
+	}
+
+
+	/**
+	 * 对文件名进行过滤
+	 * @param	string
+	 * @param 	bool
+	 * @return	string
+	 */
+	private function sanitizeFilename($str, $relative_path = FALSE)
+	{
+		$bad = array(
+			'../',
+			'<!--',
+			'-->',
+			'<',
+			'>',
+			"'",
+			'"',
+			'&',
+			'$',
+			'#',
+			'{',
+			'}',
+			'[',
+			']',
+			'=',
+			';',
+			'?',
+			'%20',
+			'%22',
+			'%3c',		// <
+			'%253c',	// <
+			'%3e',		// >
+			'%0e',		// >
+			'%28',		// (
+			'%29',		// )
+			'%2528',	// (
+			'%26',		// &
+			'%24',		// $
+			'%3f',		// ?
+			'%3b',		// ;
+			'%3d'		// =
+		);
+
+		if ( !$relative_path )
+		{
+			$bad[] = './';
+			$bad[] = '/';
+		}
+
+		$str = $this->removeInvisibleCharacters($str,false );
+		return stripslashes( str_replace($bad, '', $str) );
+	}
+
+	
+
+	/**
+	 * 合拼被分开的语句
+	 * @param	type
+	 * @return	type
+	 */
+	protected function compactExplodedWords($matches)
+	{
+		return preg_replace('/\s+/s', '', $matches[1]).$matches[2];
+	}
+
+
+	/*
+	 * 清除不合法的属性
+	 */
+	protected function removeEvilAttributes($str, $is_image)
+	{
+		// All javascript event handlers (e.g. onload, onclick, onmouseover), style, and xmlns
+		$evil_attributes = array('on\w*', 'style', 'xmlns', 'formaction');
+
+		if ($is_image === TRUE)
+		{
+			/*
+			 * Adobe Photoshop puts XML metadata into JFIF images, 
+			 * including namespacing, so we have to allow this for images.
+			 */
+			unset($evil_attributes[array_search('xmlns', $evil_attributes)]);
+		}
+
+		do {
+			$count = 0;
+			$attribs = array();
+
+
+            //匹配所有属性。如果属性值中含有与第2匹配符相等的引号("|')则后面的值不再匹配。
+			preg_match_all('/('.implode('|', $evil_attributes).')\s*=\s*(\042|\047)([^\\2]*?)(\\2)/is', $str, $matches, PREG_SET_ORDER);
+
+			foreach ($matches as $attr)
+			{
+				$attribs[] = preg_quote($attr[0], '/');
+			}
+
+			// find occurrences of illegal attribute strings without quotes
+			preg_match_all('/('.implode('|', $evil_attributes).')\s*=\s*([^\s>]*)/is', $str, $matches, PREG_SET_ORDER);
+
+			foreach ($matches as $attr)
+			{
+				$attribs[] = preg_quote($attr[0], '/');
+			}
+
+			// replace illegal attribute strings that are inside an html tag
+			if (count($attribs) > 0)
+			{
+				$str = preg_replace('/(<?)(\/?[^><]+?)([^A-Za-z<>\-])(.*?)('.implode('|', $attribs).')(.*?)([\s><]?)([><]*)/i', '$1$2 $4$6$7$8', $str, -1, $count);
+			}
+
+		} while ($count);
+
+		return $str;
+	}
+
+	/**
+	 * 修正不符合要求的html标签
+	 * @param	array
+	 * @return	string
+	 */
+	protected function sanitizeNaughtyHtml($matches)
+	{
+		$str = '&lt;'.$matches[1].$matches[2].$matches[3];
+		$str .= str_replace(array('>', '<'), array('&gt;', '&lt;'),$matches[4]);
+		return $str;
+	}
+
+	/**
+	 * 清除引用 css 资源时出现的非法关键词
+	 * @param	array
+	 * @return	string
+	 */
+	protected function jslinkRemoval($match)
+	{
+		return str_replace(
+			$match[1],
+			preg_replace(
+				'#href=.*?(alert\(|alert&\#40;|javascript\:|livescript\:|mocha\:|charset\=|window\.|document\.|\.cookie|<script|<xss|data\s*:)#si',
+				'',
+				$this->filterAttributes(str_replace(array('<', '>'), '', $match[1]))
+			),
+			$match[0]
+		);
+	}
+
+	
+
+	/**
+	 * 清除引用 js img 资源时出现的非法关键词
+	 * @param	array
+	 * @return	string
+	 */
+	protected function jsimgRemoval($match)
+	{
+		return str_replace(
+			$match[1],
+			preg_replace(
+				'#src=.*?(alert\(|alert&\#40;|javascript\:|livescript\:|mocha\:|charset\=|window\.|document\.|\.cookie|<script|<xss|base64\s*,)#si',
+				'',
+				$this->filterAttributes(str_replace(array('<', '>'), '', $match[1]))
+			),
+			$match[0]
+		);
+	}
+
+	/**
+     * 转换属性中中的尖括号和反斜线
+	 * @param	array
+	 * @return	string
+	 */
+	protected function convertAttribute($match)
+	{
+		return str_replace(array('>', '<', '\\'), array('&gt;', '&lt;', '\\\\'), $match[0]);
+	}
+
+	/**
+	 * 过滤 html 属性
+	 */
+	protected function filterAttributes($str)
+	{
+		$attr = '';
+		if (preg_match_all('#\s*[a-z\-]+\s*=\s*(\042|\047)([^\\1]*?)\\1#is', $str, $matches))
+		{
+			foreach ($matches[0] as $match)
+			{
+				$attr.= preg_replace('#/\*.*?\*/#s', '', $match);
+			}
+		}
+		return $attr;
+	}
+
+	
+
+	/**
+	 * 解码html实体标签
+	 * @param	array
+	 * @return	string
+	 */
+	private function decodeEntity($match)
+	{
+		return $this->unhtmlentities( $match[0] ,  $this->getCharset() );
+	}
+
+	/**
+     * @private
+	 * @param 	string
+	 * @return 	string
+	 */
+	private function validateEntities($str)
+	{
+        static $hash=null;
+        $hash===null && $hash = md5( time() + mt_rand(0, 1999999999) );
+
+		$str = preg_replace('|\&([a-z\_0-9\-]+)\=([a-z\_0-9\-]+)|i', $hash."\\1=\\2", $str);
+		$str = preg_replace('#(&\#?[0-9a-z]{2,})([\x00-\x20])*;?#i', "\\1;\\2", $str);
+		$str = preg_replace('#(&\#x?)([0-9A-F]+);?#i',"\\1\\2;",$str);
+		$str = str_replace($hash, '&', $str);
+		return $str;
+	}
+
+
+	/**
+	 * 去掉或者替换不允许出现的字符
+	 * @param 	string
+	 * @return 	string
+	 */
+	private function disallow( $str )
+	{
+		$str = str_replace( array_keys($this->neverAllowed), $this->neverAllowed, $str);
+		foreach( $this->neverAllowedRegex as $regex)
+		{
+			$str = preg_replace('#'.$regex.'#is', '[removed]', $str);
+		}
+		return $str;
+	}
+
+    /**
+     * @private
+     * 检查键名是符合法
+     * @param	$key string
+     * @return	boolean
+     */
+    private function checkKey( $key )
+    {
+        if( !preg_match('/^[a-z0-9:_\/-]+$/i', trim($key) ) )
+            throw new Error(Lang::info(1013));
+        return $key;
+    }
+
+    /**
+     * @private
+     * 清理输入的数据和自动生成的全局变量。
+     * 当 register_globals=on 时可能产生不可预知的全局变量。
+     */
+    private function checkGlobals()
+    {
+        /**
+         * 保留这些全局变量
+         */
+        static $protected = array('_SERVER', '_GET', '_POST', '_FILES','_SESSION', '_ENV', 'GLOBALS', 'HTTP_RAW_POST_DATA');
+
+        //销毁 cookie 中的这些键的值
+        if ( is_array($_COOKIE) )
+        {
+            unset( $_COOKIE['$Version'] );
+            unset( $_COOKIE['$Path']    );
+            unset( $_COOKIE['$Domain']  );
+        }
+
+        /*
+        * 清除所有未知的全局变量
+        */
+        $clean=function($name) use( &$protected )
+        {
+            if ( is_string($name) && !in_array($name, $protected) )
+            {
+                global $$name;
+                unset($$name);
+            }
+        };
+
+        foreach ( array($_GET, $_POST, $_COOKIE)  as $global )
+        {
+            if( is_array( $global ) )
+            {
+                foreach ($global as $key => $val)
+                {
+                    $clean($key);
+                }
+                $this->filter( $global );
+
+            }else
+            {
+                $clean( $global );
+            }
+        }
+        $_SERVER['PHP_SELF'] = strip_tags( $_SERVER['PHP_SELF'] );
+    }
+
+}

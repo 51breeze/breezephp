@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <script src="./application/public/angular.debug.js"></script>
+    <title>Bootstrap 101 Template</title>
+
+  </head>
+
+  <body ng-controller="WelcomeController" >
+
+  {{greeting}}
+
+  <div>
+
+      <p>在输入框中尝试输入:</p>
+      <p>姓名: <input type="text" ng-model="name"></p>
+      <p ng-bind="name" ngValue="21212"></p>
+
+  </div>
+
+</body>
+
+<script>
+
+
+
+     var app = angular.module('myApp', [])
+         .controller('WelcomeController', function($scope) {
+             $scope.greeting = 'Welcome!';
+       });
+     angular.bootstrap(document, ['myApp']);
+
+angular.element(document).ready(function(){
+
+    alert(app.filter())
+
+})
+
+
+
+
+
+/*
+
+    var app = angular.module('myApp', [])
+       .value('myProvide',function(name ){
+
+                            alert(name+'====')
+
+
+
+      })
+
+        .controller('myCtrl', function($scope,myProvide,$injector)
+            {
+
+
+                 myProvide('tttt')
+                 $scope.greeting = 'Welcome!';
+
+
+         });
+
+    alert(app.provider.get )*/
+
+
+</script>
+
+</html>
